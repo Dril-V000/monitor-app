@@ -18,10 +18,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.util.concurrent.Executors
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.Executors
 
 class BlockingVpnService : VpnService() {
 
@@ -42,6 +41,11 @@ class BlockingVpnService : VpnService() {
             "whatsapp.com", "www.whatsapp.com",
             "youtube.com", "www.youtube.com", "youtu.be"
         )
+
+        private val ALLOWED_PACKAGES = setOf(
+            "com.whatsapp",
+            "com.android.chrome"
+        )
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -51,12 +55,12 @@ class BlockingVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification("جاري حماية الجهاز..."))
+        startForeground(NOTIFICATION_ID, createNotification("🛡️ الحماية مفعلة"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startVpn()
-        return START_STICKY
+        return START_STICKY // يعيد تشغيل الخدمة إذا أوقفها النظام
     }
 
     private fun startVpn() {
@@ -64,7 +68,7 @@ class BlockingVpnService : VpnService() {
             vpnInterface?.close()
         } catch (e: Exception) { }
 
-        val builder = Builder()  // التصحيح: استخدام Builder() مباشرة
+        val builder = Builder()
             .setSession("حماية الجهاز")
             .addAddress("10.0.0.1", 32)
             .addRoute("0.0.0.0", 0)
@@ -91,16 +95,27 @@ class BlockingVpnService : VpnService() {
                 if (length <= 0) break
 
                 val packet = buffer.copyOf(length)
+                
+                // استخراج اسم النطاق من الحزمة
                 val domain = extractDomainFromDnsPacket(packet)
-
+                
+                // الحظر فقط إذا كان النطاق محظوراً
                 if (domain != null && isDomainBlocked(domain)) {
+                    // معرفة التطبيق المرسل
                     val uid = getPacketUid(packet)
                     val appName = getAppNameFromUid(uid)
+                    
+                    // إرسال تقرير إلى Discord
                     sendDiscordAlert(appName, domain)
-                    continue  // تجاهل الحزمة (حظرها)
+                    
+                    // تجاهل الحزمة (حظرها)
+                    Log.d(TAG, "تم حظر: $domain من $appName")
+                    continue
                 }
 
+                // تمرير جميع الحزم الأخرى
                 outputStream.write(packet)
+                
             } catch (e: Exception) {
                 Log.e(TAG, "خطأ في معالجة الحزمة: ${e.message}")
                 break
@@ -234,5 +249,9 @@ class BlockingVpnService : VpnService() {
         try {
             vpnInterface?.close()
         } catch (e: Exception) { }
+        
+        // إعادة تشغيل الخدمة إذا توقفت
+        val restartIntent = Intent(this, BlockingVpnService::class.java)
+        startService(restartIntent)
     }
 }
