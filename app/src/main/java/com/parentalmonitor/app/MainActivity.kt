@@ -23,7 +23,7 @@ class MainActivity : Activity() {
     private lateinit var devicePolicyManager: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private lateinit var prefs: SharedPreferences
-    private val PASSWORD = "your_strong_password_here" // غيّرها!
+    private val PASSWORD = "codeAA-14"
 
     companion object {
         private const val REQUEST_CODE_ENABLE_ADMIN = 1
