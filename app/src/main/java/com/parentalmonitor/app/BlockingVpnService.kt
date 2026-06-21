@@ -19,6 +19,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class BlockingVpnService : VpnService() {
 
@@ -26,7 +27,9 @@ class BlockingVpnService : VpnService() {
         private const val TAG = "BlockingVpnService"
         private const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
-        private const val DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1454075152059858997/Xn9KHc-trhyWFZkMnKmizyJOKF0rmoy7egHOvQIkHujGeKJVvf5BJfttviDmV3XZoisi" // ضع رابط Webhook هنا
+
+        // ⚠️ غير هذا الرابط إلى webhook الخاص بك
+        private const val DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1454075152059858997/Xn9KHc-trhyWFZkMnKmizyJOKF0rmoy7egHOvQIkHujGeKJVvf5BJfttviDmV3XZoisi"
 
         private val BLOCKED_DOMAINS = setOf(
             "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com",
@@ -43,14 +46,18 @@ class BlockingVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private val executor = Executors.newSingleThreadExecutor()
-    private val client = OkHttpClient()
+    
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .build()
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("🛡️ الحماية مفعلة"))
         
-        // إرسال تقرير اختباري عند بدء VPN
+        // إرسال رسالة تفعيل عند بدء الخدمة
         sendTestDiscordAlert()
     }
 
@@ -73,6 +80,7 @@ class BlockingVpnService : VpnService() {
             .setBlocking(true)
 
         vpnInterface = builder.establish()
+        
         vpnInterface?.let {
             executor.execute {
                 processPackets(it)
@@ -90,50 +98,55 @@ class BlockingVpnService : VpnService() {
                 val length = inputStream.read(buffer)
                 if (length <= 0) break
 
-                // نسخ الحزمة للتحليل
                 val packet = buffer.copyOf(length)
                 
-                // محاولة استخراج النطاق من الحزمة (إذا كانت DNS)
-                val domain = extractDomainFromDnsPacket(packet)
-                
-                // إذا كان النطاق محظوراً، نمنع الحزمة
+                // محاولة استخراج النطاق من حزمة DNS Query
+                val domain = extractDomainFromDnsPacketImproved(packet)
+
                 if (domain != null && isDomainBlocked(domain)) {
-                    // معرفة التطبيق المرسل
                     val appName = getAppNameFromUid(android.os.Process.myUid())
-                    // إرسال تقرير إلى Discord
                     sendDiscordAlert(appName, domain)
                     Log.d(TAG, "🚫 تم حظر: $domain")
-                    continue // تجاهل الحزمة (لا نمررها)
+                    continue // حظر الحزمة (لا نعيدها)
                 }
 
-                // تمرير جميع الحزم الأخرى (الآمنة)
+                // تمرير الحزم الآمنة
                 outputStream.write(packet)
-                
+                outputStream.flush()
+
             } catch (e: Exception) {
                 Log.e(TAG, "خطأ في معالجة الحزمة: ${e.message}")
-                break
+                // لا نوقف الـ loop عند حدوث خطأ (هذا يمنع انقطاع الإنترنت)
+                try { Thread.sleep(5) } catch (_: Exception) {}
             }
         }
     }
 
-    private fun extractDomainFromDnsPacket(packet: ByteArray): String? {
+    /** دالة استخراج اسم النطاق من حزمة DNS Query - محسنة */
+    private fun extractDomainFromDnsPacketImproved(packet: ByteArray): String? {
         try {
-            // تحقق بسيط: هل هذه حزمة DNS؟
-            if (packet.size < 12) return null
-            // التحقق من أن هذه حزمة DNS (منفذ 53)
-            if (packet[2].toInt() and 0x80 == 0) return null
+            if (packet.size < 20) return null
+
+            // QR bit == 0 → DNS Query
+            val flags = ((packet[2].toInt() and 0xFF) shl 8) or (packet[3].toInt() and 0xFF)
+            if ((flags and 0x8000) != 0) return null // ليس استعلام
 
             var pos = 12
             val domainBuilder = StringBuilder()
+
             while (pos < packet.size) {
-                val len = packet[pos].toInt()
+                val len = packet[pos].toInt() and 0xFF
                 if (len == 0) break
                 if (pos + len >= packet.size) break
+
                 if (domainBuilder.isNotEmpty()) domainBuilder.append('.')
-                domainBuilder.append(String(packet, pos + 1, len))
+                domainBuilder.append(String(packet, pos + 1, len, Charsets.US_ASCII))
                 pos += len + 1
             }
-            return domainBuilder.toString().ifEmpty { null }
+
+            val domain = domainBuilder.toString().lowercase(Locale.getDefault())
+            return if (domain.isNotEmpty() && domain.contains(".")) domain else null
+
         } catch (e: Exception) {
             return null
         }
@@ -147,7 +160,7 @@ class BlockingVpnService : VpnService() {
         return try {
             val pm = packageManager
             val packages = pm.getPackagesForUid(uid)
-            if (packages != null && packages.isNotEmpty()) {
+            if (!packages.isNullOrEmpty()) {
                 val appInfo = pm.getApplicationInfo(packages[0], 0)
                 pm.getApplicationLabel(appInfo).toString()
             } else {
@@ -158,14 +171,15 @@ class BlockingVpnService : VpnService() {
         }
     }
 
+    /** إرسال تنبيه عند حظر نطاق */
     private fun sendDiscordAlert(appName: String, domain: String) {
         try {
             val json = JSONObject().apply {
-                put("content", "🚨 **محاولة اتصال محظورة**")
+                put("content", "🚨 **تم حظر محاولة اتصال**")
                 put("embeds", arrayOf(
                     JSONObject().apply {
-                        put("title", "تفاصيل المحاولة")
-                        put("color", 16711680)
+                        put("title", "🔒 حظر ناجح")
+                        put("color", 16711680) // أحمر
                         put("fields", arrayOf(
                             JSONObject().apply {
                                 put("name", "📱 التطبيق")
@@ -173,7 +187,7 @@ class BlockingVpnService : VpnService() {
                                 put("inline", true)
                             },
                             JSONObject().apply {
-                                put("name", "🌐 الموقع")
+                                put("name", "🌐 النطاق")
                                 put("value", domain)
                                 put("inline", true)
                             },
@@ -194,23 +208,30 @@ class BlockingVpnService : VpnService() {
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    Log.e(TAG, "❌ فشل الإرسال إلى Discord: ${e.message}")
+                    Log.e(TAG, "❌ فشل إرسال تنبيه الحظر: ${e.message}")
                 }
                 override fun onResponse(call: Call, response: Response) {
                     response.close()
-                    Log.i(TAG, "✅ تم إرسال التقرير إلى Discord")
+                    Log.i(TAG, "✅ تم إرسال تنبيه الحظر إلى Discord")
                 }
             })
         } catch (e: Exception) {
-            Log.e(TAG, "❌ خطأ في إرسال التقرير: ${e.message}")
+            Log.e(TAG, "خطأ في إرسال تنبيه الحظر", e)
         }
     }
 
-    // دالة اختبارية لإرسال تقرير عند بدء VPN
+    /** رسالة تفعيل الحماية */
     private fun sendTestDiscordAlert() {
         try {
             val json = JSONObject().apply {
                 put("content", "✅ **تم تفعيل حماية الجهاز بنجاح!**")
+                put("embeds", arrayOf(
+                    JSONObject().apply {
+                        put("title", "🛡️ الحماية نشطة الآن")
+                        put("color", 65280) // أخضر
+                        put("description", "سيتم إشعارك فوراً عند أي محاولة للوصول إلى مواقع التواصل الاجتماعي المحظورة.")
+                    }
+                ))
             }
 
             val request = Request.Builder()
@@ -220,15 +241,15 @@ class BlockingVpnService : VpnService() {
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    Log.e(TAG, "❌ فشل إرسال رسالة الاختبار: ${e.message}")
+                    Log.e(TAG, "❌ فشل إرسال رسالة التفعيل: ${e.message}")
                 }
                 override fun onResponse(call: Call, response: Response) {
                     response.close()
-                    Log.i(TAG, "✅ تم إرسال رسالة الاختبار إلى Discord")
+                    Log.i(TAG, "✅ تم إرسال رسالة التفعيل بنجاح")
                 }
             })
         } catch (e: Exception) {
-            Log.e(TAG, "❌ خطأ في إرسال رسالة الاختبار: ${e.message}")
+            Log.e(TAG, "خطأ في إرسال رسالة التفعيل", e)
         }
     }
 
@@ -239,7 +260,7 @@ class BlockingVpnService : VpnService() {
                 "حماية الجهاز",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "VPN نشط لحظر مواقع التواصل"
+                description = "VPN نشط لحظر مواقع التواصل الاجتماعي"
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
@@ -252,13 +273,23 @@ class BlockingVpnService : VpnService() {
             this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("🛡️ الحماية مفعلة")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("🛡️ الحماية مفعلة")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_lock_lock)
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .build()
+        } else {
+            Notification.Builder(this)
+                .setContentTitle("🛡️ الحماية مفعلة")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_lock_lock)
+                .setContentIntent(pendingIntent)
+                .setOngoing(true)
+                .build()
+        }
     }
 
     override fun onDestroy() {
@@ -266,5 +297,6 @@ class BlockingVpnService : VpnService() {
         try {
             vpnInterface?.close()
         } catch (e: Exception) { }
+        executor.shutdown()
     }
 }
