@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="com.parentalmonitor.app">
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- الصلاحيات المطلوبة -->
+    <!-- الصلاحيات -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -18,7 +17,6 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
 
-        <!-- النشاط الرئيسي -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -29,7 +27,6 @@
             </intent-filter>
         </activity>
 
-        <!-- مستقبل صلاحية إدارة الجهاز -->
         <receiver
             android:name=".MonitorDeviceAdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"
@@ -42,7 +39,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- خدمة VPN -->
         <service
             android:name=".BlockingVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
@@ -51,15 +47,6 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
-
-        <!-- مستقبل بدء التشغيل -->
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-            </intent-filter>
-        </receiver>
 
     </application>
 </manifest>
