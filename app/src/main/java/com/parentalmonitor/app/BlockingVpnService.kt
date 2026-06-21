@@ -4,7 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -17,7 +16,6 @@ import org.json.JSONObject
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
@@ -28,7 +26,7 @@ class BlockingVpnService : VpnService() {
         private const val TAG = "BlockingVpnService"
         private const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
-        private const val DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1454075152059858997/Xn9KHc-trhyWFZkMnKmizyJOKF0rmoy7egHOvQIkHujGeKJVvf5BJfttviDmV3XZoisi"
+        private const val DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1454075152059858997/Xn9KHc-trhyWFZkMnKmizyJOKF0rmoy7egHOvQIkHujGeKJVvf5BJfttviDmV3XZoisi" // ضع رابط Webhook هنا
 
         private val BLOCKED_DOMAINS = setOf(
             "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com",
@@ -41,11 +39,6 @@ class BlockingVpnService : VpnService() {
             "whatsapp.com", "www.whatsapp.com",
             "youtube.com", "www.youtube.com", "youtu.be"
         )
-
-        private val ALLOWED_PACKAGES = setOf(
-            "com.whatsapp",
-            "com.android.chrome"
-        )
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -56,11 +49,14 @@ class BlockingVpnService : VpnService() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("🛡️ الحماية مفعلة"))
+        
+        // إرسال تقرير اختباري عند بدء VPN
+        sendTestDiscordAlert()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startVpn()
-        return START_STICKY // يعيد تشغيل الخدمة إذا أوقفها النظام
+        return START_STICKY
     }
 
     private fun startVpn() {
@@ -94,26 +90,23 @@ class BlockingVpnService : VpnService() {
                 val length = inputStream.read(buffer)
                 if (length <= 0) break
 
+                // نسخ الحزمة للتحليل
                 val packet = buffer.copyOf(length)
                 
-                // استخراج اسم النطاق من الحزمة
+                // محاولة استخراج النطاق من الحزمة (إذا كانت DNS)
                 val domain = extractDomainFromDnsPacket(packet)
                 
-                // الحظر فقط إذا كان النطاق محظوراً
+                // إذا كان النطاق محظوراً، نمنع الحزمة
                 if (domain != null && isDomainBlocked(domain)) {
                     // معرفة التطبيق المرسل
-                    val uid = getPacketUid(packet)
-                    val appName = getAppNameFromUid(uid)
-                    
+                    val appName = getAppNameFromUid(android.os.Process.myUid())
                     // إرسال تقرير إلى Discord
                     sendDiscordAlert(appName, domain)
-                    
-                    // تجاهل الحزمة (حظرها)
-                    Log.d(TAG, "تم حظر: $domain من $appName")
-                    continue
+                    Log.d(TAG, "🚫 تم حظر: $domain")
+                    continue // تجاهل الحزمة (لا نمررها)
                 }
 
-                // تمرير جميع الحزم الأخرى
+                // تمرير جميع الحزم الأخرى (الآمنة)
                 outputStream.write(packet)
                 
             } catch (e: Exception) {
@@ -125,7 +118,9 @@ class BlockingVpnService : VpnService() {
 
     private fun extractDomainFromDnsPacket(packet: ByteArray): String? {
         try {
+            // تحقق بسيط: هل هذه حزمة DNS؟
             if (packet.size < 12) return null
+            // التحقق من أن هذه حزمة DNS (منفذ 53)
             if (packet[2].toInt() and 0x80 == 0) return null
 
             var pos = 12
@@ -146,10 +141,6 @@ class BlockingVpnService : VpnService() {
 
     private fun isDomainBlocked(domain: String): Boolean {
         return BLOCKED_DOMAINS.any { domain.contains(it, ignoreCase = true) }
-    }
-
-    private fun getPacketUid(packet: ByteArray): Int {
-        return android.os.Process.myUid()
     }
 
     private fun getAppNameFromUid(uid: Int): String {
@@ -203,15 +194,41 @@ class BlockingVpnService : VpnService() {
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    Log.e(TAG, "فشل الإرسال إلى Discord: ${e.message}")
+                    Log.e(TAG, "❌ فشل الإرسال إلى Discord: ${e.message}")
                 }
                 override fun onResponse(call: Call, response: Response) {
                     response.close()
-                    Log.i(TAG, "تم إرسال التقرير إلى Discord")
+                    Log.i(TAG, "✅ تم إرسال التقرير إلى Discord")
                 }
             })
         } catch (e: Exception) {
-            Log.e(TAG, "خطأ في إرسال التقرير: ${e.message}")
+            Log.e(TAG, "❌ خطأ في إرسال التقرير: ${e.message}")
+        }
+    }
+
+    // دالة اختبارية لإرسال تقرير عند بدء VPN
+    private fun sendTestDiscordAlert() {
+        try {
+            val json = JSONObject().apply {
+                put("content", "✅ **تم تفعيل حماية الجهاز بنجاح!**")
+            }
+
+            val request = Request.Builder()
+                .url(DISCORD_WEBHOOK_URL)
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
+            client.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    Log.e(TAG, "❌ فشل إرسال رسالة الاختبار: ${e.message}")
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    response.close()
+                    Log.i(TAG, "✅ تم إرسال رسالة الاختبار إلى Discord")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ خطأ في إرسال رسالة الاختبار: ${e.message}")
         }
     }
 
@@ -249,9 +266,5 @@ class BlockingVpnService : VpnService() {
         try {
             vpnInterface?.close()
         } catch (e: Exception) { }
-        
-        // إعادة تشغيل الخدمة إذا توقفت
-        val restartIntent = Intent(this, BlockingVpnService::class.java)
-        startService(restartIntent)
     }
 }
