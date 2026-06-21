@@ -11,13 +11,17 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
-import java.net.InetSocketAddress
 import java.nio.ByteBuffer
-import java.nio.channels.DatagramChannel
+import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.text.SimpleDateFormat
+import java.util.*
 
 class BlockingVpnService : VpnService() {
 
@@ -27,9 +31,8 @@ class BlockingVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1454075152059858997/Xn9KHc-trhyWFZkMnKmizyJOKF0rmoy7egHOvQIkHujGeKJVvf5BJfttviDmV3XZoisi"
 
-        // قائمة النطاقات المحظورة (وسائل التواصل الاجتماعي)
         private val BLOCKED_DOMAINS = setOf(
-            "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com", "fbcdn.net",
+            "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com",
             "instagram.com", "www.instagram.com", "cdninstagram.com",
             "twitter.com", "www.twitter.com", "x.com",
             "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
@@ -37,16 +40,7 @@ class BlockingVpnService : VpnService() {
             "discord.com", "www.discord.com", "discord.gg",
             "telegram.org", "www.telegram.org", "t.me",
             "whatsapp.com", "www.whatsapp.com",
-            "youtube.com", "www.youtube.com", "youtu.be",
-            "reddit.com", "www.reddit.com",
-            "pinterest.com", "www.pinterest.com",
-            "tumblr.com", "www.tumblr.com"
-        )
-
-        // قائمة التطبيقات المسموحة (مثل واتساب)
-        private val ALLOWED_PACKAGES = setOf(
-            "com.whatsapp",
-            "com.whatsapp.w4b"
+            "youtube.com", "www.youtube.com", "youtu.be"
         )
     }
 
@@ -68,9 +62,9 @@ class BlockingVpnService : VpnService() {
     private fun startVpn() {
         try {
             vpnInterface?.close()
-        } catch (e: Exception) { /* تجاهل */ }
+        } catch (e: Exception) { }
 
-        val builder = VpnService.Builder()
+        val builder = Builder()  // التصحيح: استخدام Builder() مباشرة
             .setSession("حماية الجهاز")
             .addAddress("10.0.0.1", 32)
             .addRoute("0.0.0.0", 0)
@@ -80,41 +74,33 @@ class BlockingVpnService : VpnService() {
 
         vpnInterface = builder.establish()
         vpnInterface?.let {
-            executor.execute { 
-                processPackets(it) 
+            executor.execute {
+                processPackets(it)
             }
         }
     }
 
     private fun processPackets(vpnFd: ParcelFileDescriptor) {
-        val buffer = ByteBuffer.allocate(32767)
-        val channel = DatagramChannel.open()
-        channel.connect(InetSocketAddress("127.0.0.1", 0))
-        channel.configureBlocking(false)
+        val inputStream = FileInputStream(vpnFd.fileDescriptor)
+        val outputStream = FileOutputStream(vpnFd.fileDescriptor)
+        val buffer = ByteArray(32767)
 
         while (true) {
             try {
-                val length = vpnFd.fd.read(buffer)
+                val length = inputStream.read(buffer)
                 if (length <= 0) break
 
-                // تحليل الحزمة لاستخراج النطاق المطلوب
-                val packet = buffer.array().copyOf(length)
+                val packet = buffer.copyOf(length)
                 val domain = extractDomainFromDnsPacket(packet)
 
                 if (domain != null && isDomainBlocked(domain)) {
-                    // معرفة التطبيق المرسل
                     val uid = getPacketUid(packet)
                     val appName = getAppNameFromUid(uid)
-
-                    // إرسال تقرير إلى Discord
                     sendDiscordAlert(appName, domain)
-
-                    // حظر الحزمة (تجاهلها)
-                    continue
+                    continue  // تجاهل الحزمة (حظرها)
                 }
 
-                // إعادة إرسال الحزمة
-                vpnFd.fd.write(packet)
+                outputStream.write(packet)
             } catch (e: Exception) {
                 Log.e(TAG, "خطأ في معالجة الحزمة: ${e.message}")
                 break
@@ -124,11 +110,9 @@ class BlockingVpnService : VpnService() {
 
     private fun extractDomainFromDnsPacket(packet: ByteArray): String? {
         try {
-            // تحليل بسيط لحزم DNS (البايتات 12-... تحتوي على اسم النطاق)
             if (packet.size < 12) return null
-            // تحقق من أن هذه حزمة DNS (منفذ 53)
             if (packet[2].toInt() and 0x80 == 0) return null
-            
+
             var pos = 12
             val domainBuilder = StringBuilder()
             while (pos < packet.size) {
@@ -150,8 +134,6 @@ class BlockingVpnService : VpnService() {
     }
 
     private fun getPacketUid(packet: ByteArray): Int {
-        // في التطبيق الحقيقي، استخرج UID من الحزمة (معقد)
-        // سنستخدم نهجاً مبسطاً: نأخذ UID من السياق
         return android.os.Process.myUid()
     }
 
@@ -171,47 +153,51 @@ class BlockingVpnService : VpnService() {
     }
 
     private fun sendDiscordAlert(appName: String, domain: String) {
-        val json = JSONObject().apply {
-            put("content", "🚨 **محاولة اتصال محظورة**")
-            put("embeds", arrayOf(
-                JSONObject().apply {
-                    put("title", "تفاصيل المحاولة")
-                    put("color", 16711680)
-                    put("fields", arrayOf(
-                        JSONObject().apply {
-                            put("name", "📱 التطبيق")
-                            put("value", appName)
-                            put("inline", true)
-                        },
-                        JSONObject().apply {
-                            put("name", "🌐 الموقع")
-                            put("value", domain)
-                            put("inline", true)
-                        },
-                        JSONObject().apply {
-                            put("name", "⏰ الوقت")
-                            put("value", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()))
-                            put("inline", false)
-                        }
-                    ))
+        try {
+            val json = JSONObject().apply {
+                put("content", "🚨 **محاولة اتصال محظورة**")
+                put("embeds", arrayOf(
+                    JSONObject().apply {
+                        put("title", "تفاصيل المحاولة")
+                        put("color", 16711680)
+                        put("fields", arrayOf(
+                            JSONObject().apply {
+                                put("name", "📱 التطبيق")
+                                put("value", appName)
+                                put("inline", true)
+                            },
+                            JSONObject().apply {
+                                put("name", "🌐 الموقع")
+                                put("value", domain)
+                                put("inline", true)
+                            },
+                            JSONObject().apply {
+                                put("name", "⏰ الوقت")
+                                put("value", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()))
+                                put("inline", false)
+                            }
+                        ))
+                    }
+                ))
+            }
+
+            val request = Request.Builder()
+                .url(DISCORD_WEBHOOK_URL)
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
+            client.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    Log.e(TAG, "فشل الإرسال إلى Discord: ${e.message}")
                 }
-            ))
+                override fun onResponse(call: Call, response: Response) {
+                    response.close()
+                    Log.i(TAG, "تم إرسال التقرير إلى Discord")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "خطأ في إرسال التقرير: ${e.message}")
         }
-
-        val request = Request.Builder()
-            .url(DISCORD_WEBHOOK_URL)
-            .post(json.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                Log.e(TAG, "فشل الإرسال إلى Discord: ${e.message}")
-            }
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-                Log.i(TAG, "تم إرسال التقرير إلى Discord")
-            }
-        })
     }
 
     private fun createNotificationChannel() {
@@ -247,6 +233,6 @@ class BlockingVpnService : VpnService() {
         super.onDestroy()
         try {
             vpnInterface?.close()
-        } catch (e: Exception) { /* تجاهل */ }
+        } catch (e: Exception) { }
     }
 }
