@@ -3,31 +3,28 @@ package com.parentalmonitor.app
 import android.app.Activity
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.net.VpnService
 import android.os.Bundle
-import android.text.InputType
-import android.view.View
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
-import android.content.pm.PackageManager
 
+/**
+ * شاشة تطبيق واضحة وظاهرة: تفعيل صلاحية المدير، تفعيل/إيقاف الحماية.
+ * كل الأزرار شغالة بدون أي قفل أو إخفاء - المستخدم يتحكم بالتطبيق
+ * بحرية، وأي إيقاف يرسل تنبيه فوري لمدير الجهاز عبر ديسكورد.
+ */
 class MainActivity : Activity() {
 
     private lateinit var devicePolicyManager: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
-    private lateinit var prefs: SharedPreferences
-    private val PASSWORD = "codeAA-14"
+    private lateinit var statusText: TextView
+    private lateinit var vpnButton: Button
 
     companion object {
         private const val REQUEST_CODE_ENABLE_ADMIN = 1
-        private const val VPN_REQUEST_CODE = 2
+        private const val REQUEST_CODE_VPN_PERMISSION = 2
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,45 +32,7 @@ class MainActivity : Activity() {
 
         devicePolicyManager = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         adminComponent = ComponentName(this, MonitorDeviceAdminReceiver::class.java)
-        prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
 
-        val isConfigured = prefs.getBoolean("is_configured", false)
-
-        if (isConfigured) {
-            showPasswordDialog()
-            return
-        }
-
-        setupMainUI()
-    }
-
-    private fun showPasswordDialog() {
-        val editText = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            hint = "أدخل كلمة المرور"
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("🔒 حماية الجهاز")
-            .setMessage("أدخل كلمة المرور للوصول إلى الإعدادات")
-            .setView(editText)
-            .setPositiveButton("دخول") { _, _ ->
-                if (editText.text.toString() == PASSWORD) {
-                    showAppIcon()
-                    setupMainUI()
-                } else {
-                    Toast.makeText(this, "❌ كلمة مرور خاطئة", Toast.LENGTH_SHORT).show()
-                    finish()
-                }
-            }
-            .setNegativeButton("إلغاء") { _, _ ->
-                finish()
-            }
-            .setCancelable(false)
-            .show()
-    }
-
-    private fun setupMainUI() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 96, 48, 48)
@@ -81,49 +40,31 @@ class MainActivity : Activity() {
 
         val title = TextView(this).apply {
             text = "🛡️ حماية الجهاز"
-            textSize = 24f
-            setPadding(0, 0, 0, 48)
+            textSize = 22f
+            setPadding(0, 0, 0, 32)
         }
 
-        val statusText = TextView(this).apply {
-            text = getStatusText()
+        statusText = TextView(this).apply {
             textSize = 16f
-            setPadding(0, 0, 0, 48)
+            setPadding(0, 0, 0, 32)
         }
 
-        val enableAdminButton = Button(this).apply {
-            text = "🔑 تفعيل صلاحية المدير"
+        val adminButton = Button(this).apply {
+            text = "تفعيل صلاحية المدير"
             setOnClickListener { requestAdminPermission() }
         }
 
-        val enableVpnButton = Button(this).apply {
-            text = "🌐 تفعيل حماية الإنترنت (VPN)"
-            setOnClickListener { startVpn() }
-        }
-
-        val configureButton = Button(this).apply {
-            text = "🔒 تفعيل الحماية الكاملة وإخفاء التطبيق"
-            setOnClickListener {
-                enableFullProtection()
-            }
+        vpnButton = Button(this).apply {
+            setOnClickListener { toggleVpn() }
         }
 
         layout.addView(title)
         layout.addView(statusText)
-        layout.addView(enableAdminButton)
-        layout.addView(enableVpnButton)
-        layout.addView(configureButton)
+        layout.addView(adminButton)
+        layout.addView(vpnButton)
         setContentView(layout)
-    }
 
-    private fun getStatusText(): String {
-        val isAdminActive = devicePolicyManager.isAdminActive(adminComponent)
-        val isVpnActive = prefs.getBoolean("vpn_active", false)
-        return buildString {
-            append(if (isAdminActive) "✅ صلاحية المدير: مفعّلة\n" else "❌ صلاحية المدير: غير مفعّلة\n")
-            append(if (isVpnActive) "✅ VPN: مفعّل\n" else "❌ VPN: غير مفعّل\n")
-            append(if (devicePolicyManager.isDeviceOwnerApp(packageName)) "✅ Device Owner: مفعّل\n" else "⚠️ Device Owner: غير مفعّل (اختياري)")
-        }
+        updateStatus()
     }
 
     private fun requestAdminPermission() {
@@ -131,85 +72,81 @@ class MainActivity : Activity() {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
             putExtra(
                 DevicePolicyManager.EXTRA_ADD_EXPLANATION,
-                "هذه الصلاحية تسمح للتطبيق بحماية الجهاز من التطبيقات الضارة."
+                "هذا التطبيق يحمي الجهاز من تثبيت تطبيقات معينة. الصلاحية مطلوبة لتفعيل الحماية. " +
+                "بعد التفعيل، لن يكون بالإمكان حذف هذا التطبيق إلا من خلال تعطيل صلاحية المدير أولاً."
             )
         }
         startActivityForResult(intent, REQUEST_CODE_ENABLE_ADMIN)
     }
 
-    private fun startVpn() {
-        val intent = VpnService.prepare(this)
-        if (intent != null) {
-            startActivityForResult(intent, VPN_REQUEST_CODE)
-        } else {
-            startService(Intent(this, BlockingVpnService::class.java))
-            prefs.edit().putBoolean("vpn_active", true).apply()
-            Toast.makeText(this, "✅ تم تفعيل حماية الإنترنت", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun enableFullProtection() {
-        if (!devicePolicyManager.isAdminActive(adminComponent)) {
-            requestAdminPermission()
-            Toast.makeText(this, "⚠️ يرجى تفعيل صلاحية المدير أولاً", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
-            Toast.makeText(this, "⚠️ يرجى الموافقة على اتصال VPN", Toast.LENGTH_LONG).show()
-            return
-        } else {
-            startService(Intent(this, BlockingVpnService::class.java))
-            prefs.edit().putBoolean("vpn_active", true).apply()
-        }
-
+    /**
+     * يمنع حذف التطبيق عبر صلاحية النظام الرسمية - بشكل شفاف وظاهر.
+     * التطبيق يبقى مرئياً بقائمة التطبيقات، ومحاولة حذفه تظهر رسالة واضحة
+     * تشرح أنه محمي بصلاحية إدارة الجهاز (مو مخفي أو مموه).
+     */
+    private fun blockUninstall() {
         if (devicePolicyManager.isAdminActive(adminComponent)) {
-            devicePolicyManager.setUninstallBlocked(adminComponent, packageName, true)
+            try {
+                devicePolicyManager.setUninstallBlocked(adminComponent, packageName, true)
+            } catch (e: SecurityException) {
+                // قد يحتاج صلاحية Device Owner كاملة على بعض إصدارات أندرويد
+            }
         }
-
-        prefs.edit().putBoolean("is_configured", true).apply()
-        hideAppIcon()
-
-        Toast.makeText(this, "🔒 تم تفعيل الحماية الكاملة", Toast.LENGTH_SHORT).show()
-        finish()
     }
 
-    private fun hideAppIcon() {
-        val pm = packageManager
-        pm.setApplicationEnabledSetting(
-            packageName,
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-            0
-        )
-    }
-
-    private fun showAppIcon() {
-        val pm = packageManager
-        pm.setApplicationEnabledSetting(
-            packageName,
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-            0
-        )
+    /**
+     * يشغّل أو يوقف الـVPN. الزر شغال دائماً وواضح - لا قفل ولا تعطيل.
+     * كل تشغيل أو إيقاف يُسجَّل ويُرسَل كتنبيه عبر BlockingVpnService نفسه.
+     */
+    private fun toggleVpn() {
+        if (BlockingVpnService.isRunning) {
+            startService(Intent(this, BlockingVpnService::class.java).apply { action = "STOP" })
+            updateStatus()
+        } else {
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                startActivityForResult(intent, REQUEST_CODE_VPN_PERMISSION)
+            } else {
+                startService(Intent(this, BlockingVpnService::class.java))
+                updateStatus()
+            }
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         when (requestCode) {
             REQUEST_CODE_ENABLE_ADMIN -> {
-                Toast.makeText(this, "✅ تم تحديث صلاحية المدير", Toast.LENGTH_SHORT).show()
-                recreate()
+                blockUninstall()
+                updateStatus()
             }
-            VPN_REQUEST_CODE -> {
+            REQUEST_CODE_VPN_PERMISSION -> {
                 if (resultCode == RESULT_OK) {
                     startService(Intent(this, BlockingVpnService::class.java))
-                    prefs.edit().putBoolean("vpn_active", true).apply()
-                    Toast.makeText(this, "✅ تم تفعيل حماية الإنترنت", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "❌ لم يتم تفعيل VPN", Toast.LENGTH_SHORT).show()
                 }
+                updateStatus()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStatus()
+    }
+
+    private fun updateStatus() {
+        val isAdminActive = devicePolicyManager.isAdminActive(adminComponent)
+        val isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(packageName)
+        val isVpnRunning = BlockingVpnService.isRunning
+
+        statusText.text = buildString {
+            append(if (isAdminActive) "✅ صلاحية المسؤول: مفعّلة\n" else "❌ صلاحية المسؤول: غير مفعّلة\n")
+            append(if (isDeviceOwner) "✅ Device Owner: مفعّل (تعليق التطبيقات يعمل)\n"
+                   else "⚠️ Device Owner: غير مفعّل - يحتاج إعداد عبر ADB (مرة واحدة)\n")
+            append(if (isAdminActive) "🔒 الحذف: محمي (يحتاج تعطيل صلاحية المدير أولاً)\n" else "")
+            append(if (isVpnRunning) "✅ حماية الإنترنت: مفعّلة" else "⭕ حماية الإنترنت: متوقفة")
+        }
+
+        vpnButton.text = if (isVpnRunning) "إيقاف حماية الإنترنت" else "تفعيل حماية الإنترنت"
     }
 }
