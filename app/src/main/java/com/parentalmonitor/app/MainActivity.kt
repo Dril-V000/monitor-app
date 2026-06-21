@@ -9,6 +9,7 @@ import android.content.SharedPreferences
 import android.net.VpnService
 import android.os.Bundle
 import android.text.InputType
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -22,7 +23,7 @@ class MainActivity : Activity() {
     private lateinit var devicePolicyManager: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private lateinit var prefs: SharedPreferences
-    private val PASSWORD = "codeAA-14" 
+    private val PASSWORD = "your_strong_password_here" // غيّرها!
 
     companion object {
         private const val REQUEST_CODE_ENABLE_ADMIN = 1
@@ -36,16 +37,13 @@ class MainActivity : Activity() {
         adminComponent = ComponentName(this, MonitorDeviceAdminReceiver::class.java)
         prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
 
-        // التحقق من وجود ملف الإعدادات
         val isConfigured = prefs.getBoolean("is_configured", false)
 
         if (isConfigured) {
-            // التطبيق مخفي، اطلب كلمة مرور لإظهاره
             showPasswordDialog()
             return
         }
 
-        // أول مرة تشغيل → عرض شاشة الإعدادات
         setupMainUI()
     }
 
@@ -61,7 +59,6 @@ class MainActivity : Activity() {
             .setView(editText)
             .setPositiveButton("دخول") { _, _ ->
                 if (editText.text.toString() == PASSWORD) {
-                    // كلمة المرور صحيحة → أظهر التطبيق مؤقتاً
                     showAppIcon()
                     setupMainUI()
                 } else {
@@ -152,14 +149,12 @@ class MainActivity : Activity() {
     }
 
     private fun enableFullProtection() {
-        // 1. تفعيل صلاحية المدير إن لم تكن مفعّلة
         if (!devicePolicyManager.isAdminActive(adminComponent)) {
             requestAdminPermission()
             Toast.makeText(this, "⚠️ يرجى تفعيل صلاحية المدير أولاً", Toast.LENGTH_LONG).show()
             return
         }
 
-        // 2. تفعيل VPN إن لم يكن مفعّلاً
         val vpnIntent = VpnService.prepare(this)
         if (vpnIntent != null) {
             startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
@@ -170,18 +165,13 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean("vpn_active", true).apply()
         }
 
-        // 3. منع إلغاء التثبيت
         if (devicePolicyManager.isAdminActive(adminComponent)) {
             devicePolicyManager.setUninstallBlocked(adminComponent, packageName, true)
         }
 
-        // 4. حفظ أن التطبيق مُعدّ
         prefs.edit().putBoolean("is_configured", true).apply()
-
-        // 5. إخفاء الأيقونة
         hideAppIcon()
 
-        // 6. إغلاق التطبيق
         Toast.makeText(this, "🔒 تم تفعيل الحماية الكاملة", Toast.LENGTH_SHORT).show()
         finish()
     }
